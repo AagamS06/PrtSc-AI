@@ -32,19 +32,23 @@ The model must accept **images**. Use **Fetch models** in Settings to pull the p
 
 API keys are stored in **Windows Credential Manager**, never in a plain file. Other settings live in `%APPDATA%\PrtSc AI\settings.json`.
 
-## Install
+## Download
+
+**[⬇ Download PrtSc-AI.exe](https://github.com/AagamS06/PrtSc-AI/releases/latest/download/PrtSc-AI.exe)** (Windows 10/11, single file, nothing to install)
+
+1. Double-click `PrtSc-AI.exe`.
+2. Windows may say *"Windows protected your PC"* because the app isn't code-signed. Click **More info → Run anyway**.
+3. Settings open on first run: pick a provider, paste a key, pick a model, **Save**.
+4. Snip with **Win+Shift+S** and click the **✦ AI** bubble, or press **Win+Shift+A**.
+
+It starts with Windows by default (toggle in Settings). All releases: [Releases page](https://github.com/AagamS06/PrtSc-AI/releases).
+
+### Build it yourself
 
 Needs [Python 3.10+](https://www.python.org/downloads/) (tick "Add Python to PATH").
 
-**Option 1 — build an .exe (recommended)**
-1. Download this repo (Code → Download ZIP) and unzip.
-2. Double-click `build.bat`. Wait a couple of minutes.
-3. Run `dist\PrtSc-AI.exe`. Settings open on first run — pick a provider, paste a key, pick a model, Save.
-
-**Option 2 — run from source**
-Double-click `run.bat`.
-
-By default it starts with Windows (toggle in Settings).
+- `build.bat` → builds `dist\PrtSc-AI.exe`
+- `run.bat` → runs from source
 
 ## Notes
 
