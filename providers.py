@@ -10,6 +10,7 @@ Plain `requests`, no vendor SDKs, so the .exe stays small.
 from __future__ import annotations
 
 import base64
+import time
 from dataclasses import dataclass
 
 import requests
@@ -72,24 +73,85 @@ class ProviderError(Exception):
     pass
 
 
-def _raise_for(resp: requests.Response) -> None:
-    if resp.ok:
-        return
+RETRY_STATUSES = {429, 500, 502, 503, 504, 529}
+MAX_ATTEMPTS = 4          # 1 try + 3 retries
+BACKOFF = [2, 4, 8]       # seconds between attempts
+
+
+def _error_message(resp: requests.Response) -> str:
+    """Pull the human message out of any provider's error JSON.
+    Handles {"error": {...}}, Gemini's [{"error": {...}}], and plain text."""
     try:
         data = resp.json()
-        err = data.get("error", data)
-        msg = err.get("message") if isinstance(err, dict) else str(err)
+        if isinstance(data, list) and data:
+            data = data[0]
+        if isinstance(data, dict):
+            err = data.get("error", data)
+            if isinstance(err, dict):
+                return str(err.get("message") or err.get("status") or err)
+            return str(err)
+        return str(data)
     except Exception:
-        msg = resp.text[:500]
-    hints = {
-        400: "Bad request. If the message mentions images, this model can't see images. Pick a vision model.",
-        401: "API key rejected. Check it in Settings.",
-        403: "Key lacks access to this model or region.",
-        404: "Model or endpoint not found. Check model name and base URL.",
-        429: "Rate limit or out of credit.",
-    }
-    hint = hints.get(resp.status_code, "")
-    raise ProviderError(f"HTTP {resp.status_code}: {msg}" + (f"\n\n{hint}" if hint else ""))
+        return resp.text[:300].strip() or resp.reason or "Unknown error"
+
+
+def _friendly(resp: requests.Response, provider: str, model: str, attempts: int) -> str:
+    code = resp.status_code
+    msg = _error_message(resp)
+    tried = f" (tried {attempts} times)" if attempts > 1 else ""
+    if code in (503, 529) or (code >= 500 and "demand" in msg.lower()):
+        head = (f"{provider} is overloaded right now{tried}. This is on their side, not yours.\n\n"
+                f"Try again in a minute, or pick a different model in Settings "
+                f"(a '-lite' or older model is usually less busy).")
+    elif code == 429:
+        head = (f"Rate limit hit{tried}: too many requests, or the free tier ran out.\n\n"
+                "Wait a minute and try again, or check your plan/credit with the provider.")
+    elif code >= 500:
+        head = f"{provider} had a server error{tried}. Try again in a moment."
+    elif code == 400:
+        head = ("The request was rejected. If the message mentions images, this model "
+                "can't see images, so pick a vision model in Settings.")
+    elif code == 401:
+        head = "Your API key was rejected. Check it in Settings."
+    elif code == 403:
+        head = "Your key doesn't have access to this model (or this region)."
+    elif code == 404:
+        head = f"Model '{model}' or the endpoint wasn't found. Check the model name and base URL in Settings."
+    else:
+        head = "The request failed."
+    return f"{head}\n\nDetails: HTTP {code}: {msg}"
+
+
+def _post(url: str, headers: dict, body: dict, provider: str, model: str, on_retry=None) -> dict:
+    """POST with automatic retries on overload / rate-limit / server errors."""
+    last = None
+    for attempt in range(1, MAX_ATTEMPTS + 1):
+        try:
+            r = requests.post(url, headers=headers, json=body, timeout=TIMEOUT)
+        except requests.RequestException as e:
+            if attempt == MAX_ATTEMPTS:
+                raise ProviderError(f"Couldn't reach {provider}: {e}\n\nCheck your internet connection.")
+            last = None
+        else:
+            if r.ok:
+                return r.json()
+            last = r
+            if r.status_code not in RETRY_STATUSES or attempt == MAX_ATTEMPTS:
+                raise ProviderError(_friendly(r, provider, model, attempt))
+        wait = BACKOFF[min(attempt - 1, len(BACKOFF) - 1)]
+        if last is not None:
+            ra = last.headers.get("retry-after", "")
+            if ra.isdigit():
+                wait = min(int(ra), 20)
+        if on_retry:
+            on_retry(attempt + 1, MAX_ATTEMPTS, wait)
+        time.sleep(wait)
+    raise ProviderError("Request failed.")  # unreachable
+
+
+def _raise_for(resp: requests.Response) -> None:
+    if not resp.ok:
+        raise ProviderError(_friendly(resp, "The provider", "", 1))
 
 
 def _b64(png: bytes) -> str:
@@ -129,7 +191,8 @@ def _anthropic_messages(history: list[dict]) -> list[dict]:
 
 # ---------------------------------------------------------------- calls
 
-def chat(kind: str, base_url: str, api_key: str, model: str, history: list[dict]) -> str:
+def chat(kind: str, base_url: str, api_key: str, model: str, history: list[dict],
+         provider: str = "The provider", on_retry=None) -> str:
     base = base_url.rstrip("/")
     if not base:
         raise ProviderError("No base URL set. Open Settings.")
@@ -141,9 +204,7 @@ def chat(kind: str, base_url: str, api_key: str, model: str, history: list[dict]
                    "content-type": "application/json"}
         body = {"model": model, "max_tokens": 4096, "system": SYSTEM_PROMPT,
                 "messages": _anthropic_messages(history)}
-        r = requests.post(f"{base}/messages", headers=headers, json=body, timeout=TIMEOUT)
-        _raise_for(r)
-        data = r.json()
+        data = _post(f"{base}/messages", headers, body, provider, model, on_retry)
         return "".join(b.get("text", "") for b in data.get("content", []) if b.get("type") == "text")
 
     headers = {"content-type": "application/json"}
@@ -153,9 +214,7 @@ def chat(kind: str, base_url: str, api_key: str, model: str, history: list[dict]
         headers["HTTP-Referer"] = "https://github.com/prtsc-ai"
         headers["X-Title"] = "PrtSc AI"
     body = {"model": model, "messages": _openai_messages(history)}
-    r = requests.post(f"{base}/chat/completions", headers=headers, json=body, timeout=TIMEOUT)
-    _raise_for(r)
-    data = r.json()
+    data = _post(f"{base}/chat/completions", headers, body, provider, model, on_retry)
     try:
         content = data["choices"][0]["message"]["content"]
     except (KeyError, IndexError, TypeError):

@@ -321,6 +321,7 @@ QUICK_PROMPTS = ["Explain this", "Extract the text", "Translate to English",
 
 class ChatWindow(QWidget):
     open_settings = pyqtSignal()
+    retrying = pyqtSignal(int, int, int)
     closed = pyqtSignal(object)
 
     def __init__(self, image: QImage, cfg: Config) -> None:
@@ -334,6 +335,7 @@ class ChatWindow(QWidget):
         self.setWindowIcon(app_icon())
         self.setStyleSheet(STYLE)
         self.resize(560, 680)
+        self.retrying.connect(self._on_retrying)
 
         root = QVBoxLayout(self)
         root.setContentsMargins(14, 12, 14, 14)
@@ -470,8 +472,12 @@ class ChatWindow(QWidget):
         self._busy(True)
         snapshot = list(self.history)
         self._pending = run_bg(
-            lambda: providers.chat(preset.kind, base, key, model, snapshot),
+            lambda: providers.chat(preset.kind, base, key, model, snapshot, provider=prov_name.split(' (')[0],
+                                   on_retry=lambda n, total, wait: self.retrying.emit(n, total, wait)),
             self._on_reply, self._on_error)
+
+    def _on_retrying(self, n: int, total: int, wait: int) -> None:
+        self.status.setText(f"Server busy, retrying in {wait}s (attempt {n}/{total})…")
 
     def _on_reply(self, text: str) -> None:
         self.history.append({"role": "assistant", "text": text or "_(empty reply)_", "image": None})
@@ -486,6 +492,7 @@ class ChatWindow(QWidget):
         self._busy(False)
         if failed:
             self.input.setPlainText(failed["text"])
+        self.status.setText("Couldn't get an answer. Your question is back in the box, press Send to retry.")
         QMessageBox.warning(self, "PrtSc AI", msg)
 
     def _copy_last(self) -> None:
