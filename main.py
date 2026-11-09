@@ -19,6 +19,7 @@ import winsys
 from config import Config, set_start_with_windows
 from ui import Bubble, ChatWindow, SettingsDialog, SnipOverlay, app_icon
 
+__version__ = "1.0.2"
 SINGLETON = "PrtSc-AI-singleton"
 
 
@@ -49,15 +50,36 @@ class App:
         self._build_tray()
         self.hotkey.start(self.cfg["hotkey"])
 
-        if self.cfg["first_run"]:
-            try:
-                set_start_with_windows(self.cfg["start_with_windows"])
-            except Exception:
-                pass
+        # Always point "start with Windows" at THIS exe, so a newer download takes over.
+        try:
+            set_start_with_windows(self.cfg["start_with_windows"])
+        except Exception:
+            pass
+
+        prev = self.cfg.data.get("last_version")
+        has_key = bool(Config.get_key(self.cfg["provider"])) or not self._needs_key()
+        if prev and prev != __version__:
+            self.tray.showMessage(
+                f"PrtSc AI updated to v{__version__}",
+                "Your settings and API keys were carried over from your previous version.")
+        elif self.cfg["first_run"] and not has_key:
             self.tray.showMessage(
                 "PrtSc AI is running",
                 f"Snip with Win+Shift+S and click the AI bubble, or press {self.cfg['hotkey']}.")
+        if not has_key:
             QTimer.singleShot(400, self.show_settings)
+        else:
+            self.cfg["first_run"] = False
+        self.cfg["last_version"] = __version__
+        try:
+            self.cfg.save()
+        except Exception:
+            pass
+
+    def _needs_key(self) -> bool:
+        import providers
+        p = providers.PRESETS_BY_NAME.get(self.cfg["provider"])
+        return bool(p and p.needs_key)
 
     # ---------------------------------------------------------------- tray
     def _build_tray(self) -> None:
@@ -138,18 +160,42 @@ class App:
 
 
 def main() -> int:
+    if "--selftest" in sys.argv:  # used by CI against the built exe
+        from config import selftest
+        return selftest()
+    if "--version" in sys.argv:
+        print(__version__)
+        return 0
     qapp = QApplication(sys.argv)
     qapp.setApplicationName("PrtSc AI")
     qapp.setQuitOnLastWindowClosed(False)
     qapp.setWindowIcon(app_icon())
 
-    # single instance: a second launch just triggers a snip in the first one
+    # Single instance. Launching the exe again normally just triggers a snip in the
+    # running copy. A NEWER version instead asks the old copy to quit and takes over,
+    # so updating is just "download, double-click".
+    def vtuple(v: str) -> tuple:
+        try:
+            return tuple(int(x) for x in v.split("."))
+        except ValueError:
+            return (0,)
+
     sock = QLocalSocket()
     sock.connectToServer(SINGLETON)
     if sock.waitForConnected(300):
-        sock.write(b"snip")
+        sock.write(f"hello:{__version__}".encode())
         sock.waitForBytesWritten(300)
-        return 0
+        reply = bytes(sock.readAll()) if sock.waitForReadyRead(800) else b""
+        sock.disconnectFromServer()
+        if reply != b"quitting":
+            return 0  # same/newer copy already running: it handles the snip
+        for _ in range(30):  # wait up to ~3s for the old copy to exit
+            probe = QLocalSocket()
+            probe.connectToServer(SINGLETON)
+            if not probe.waitForConnected(100):
+                break
+            probe.disconnectFromServer()
+            time.sleep(0.1)
     QLocalServer.removeServer(SINGLETON)
     server = QLocalServer()
     server.listen(SINGLETON)
@@ -158,8 +204,23 @@ def main() -> int:
 
     def on_conn():
         c = server.nextPendingConnection()
-        if c:
-            c.readyRead.connect(lambda: (c.readAll(), app.start_snip()))
+        if not c:
+            return
+
+        def on_read():
+            msg = bytes(c.readAll()).decode(errors="ignore")
+            if msg.startswith("hello:") and vtuple(msg[6:]) > vtuple(__version__):
+                c.write(b"quitting")
+                c.flush()
+                c.waitForBytesWritten(300)
+                server.close()
+                QTimer.singleShot(50, app.quit)
+            else:
+                c.write(b"ok")
+                c.flush()
+                app.start_snip()
+
+        c.readyRead.connect(on_read)
 
     server.newConnection.connect(on_conn)
     return qapp.exec()

@@ -41,7 +41,14 @@ API keys are stored in **Windows Credential Manager**, never in a plain file. Ot
 3. Settings open on first run: pick a provider, paste a key, pick a model, **Save**.
 4. Snip with **Win+Shift+S** and click the **✦ AI** bubble, or press **Win+Shift+A**.
 
-It starts with Windows by default (toggle in Settings). All releases: [Releases page](https://github.com/AagamS06/PrtSc-AI/releases).
+It starts with Windows by default (toggle in Settings).
+
+### Updating
+
+Download the new `PrtSc-AI.exe` and double-click it. That's it:
+- Your **API keys** are stored in Windows Credential Manager and your **settings** in `%APPDATA%\PrtSc AI`, not inside the .exe, so every new version picks them up automatically. No re-pasting.
+- If an older version is running, the new one closes it and takes over (from v1.0.2 on).
+- "Start with Windows" is re-pointed at the new .exe, so you can delete the old file. All releases: [Releases page](https://github.com/AagamS06/PrtSc-AI/releases).
 
 ### Build it yourself
 

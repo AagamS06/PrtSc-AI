@@ -28,6 +28,16 @@ jobs:
           QT_QPA_PLATFORM: offscreen
         run: python -c "import providers, config, winsys, ui, main; print(winsys.parse_hotkey('Win+Shift+A'))"
 
+      - name: Test key storage + migration from v1.0.0 (source)
+        shell: pwsh
+        run: |
+          # v1.0.0 saved keys through the keyring library. Recreate that, then check the new code finds and migrates them.
+          python -c "import keyring; from keyring.backends.Windows import WinVaultKeyring as K; k=K(); k.set_password('PrtSc AI','Gemini (Google)','legacy-gemini'); k.set_password('PrtSc AI','Claude (Anthropic)','legacy-claude')"
+          python -c "from config import Config, _cred_read, _target; Config(); assert Config.get_key('Gemini (Google)')=='legacy-gemini'; assert Config.get_key('Claude (Anthropic)')=='legacy-claude'; assert _cred_read(_target('Gemini (Google)'))[1]=='legacy-gemini'; print('legacy keys migrated OK')"
+          python -c "from config import Config; Config(); [Config.set_key(p,'') for p in ('Gemini (Google)','Claude (Anthropic)')]"
+          python -c "from keyring.backends.Windows import WinVaultKeyring as K; k=K(); [k.delete_password('PrtSc AI',p) for p in ('Gemini (Google)','Claude (Anthropic)')]"
+          python -c "import config, sys; sys.exit(config.selftest())"
+
       - name: Build icon
         env:
           QT_QPA_PLATFORM: offscreen
@@ -35,6 +45,13 @@ jobs:
 
       - name: Build exe
         run: pyinstaller --noconfirm --onefile --windowed --name PrtSc-AI --icon assets\icon.ico --hidden-import keyring.backends.Windows main.py
+
+      - name: Self-test the built exe (keys persist between runs)
+        shell: pwsh
+        run: |
+          $p = Start-Process -FilePath dist\PrtSc-AI.exe -ArgumentList "--selftest" -Wait -PassThru
+          if ($p.ExitCode -ne 0) { throw "exe selftest failed with $($p.ExitCode)" }
+          Write-Host "exe selftest passed"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -57,3 +74,5 @@ jobs:
             4. Snip with **Win+Shift+S** and click the **✦ AI** bubble, or press **Win+Shift+A**.
 
             PrtSc AI lives in the system tray (bottom-right). Right-click it for Settings or Quit.
+
+            **Updating:** just download the new `PrtSc-AI.exe` and run it. Your settings and API keys are stored in Windows, not in the .exe, so they carry over automatically.

@@ -633,13 +633,18 @@ class SettingsDialog(QDialog):
         d = self._drafts.get(name)
         self.base_url.setText(d["base_url"] if d else self.cfg.provider_field(name, "base_url", p.base_url))
         self.base_url.setReadOnly(not name.startswith("Custom") and "Ollama" not in name)
-        self.key.setText(d["key"] if d else Config.get_key(name))
+        saved = Config.get_key(name)
+        self.key.setText(d["key"] if d else saved)
+        if saved and not d:
+            self.test_result.setStyleSheet("color: #4ADE80;")
         self.key.setPlaceholderText("Paste API key" if p.needs_key else "Optional")
         self.model.clear()
         self.model.setEditText(d["model"] if d else self.cfg.provider_field(name, "model"))
         self.get_key.setVisible(bool(p.key_url))
         self.hint.setText(p.hint or "Pick a model that accepts images (vision).")
-        self.test_result.clear()
+        self.test_result.setText("✓ Saved key loaded from Windows. No need to paste it again." if saved and not d else "")
+        if not (saved and not d):
+            self.test_result.setStyleSheet("")
 
     def _switch_provider(self, name: str) -> None:
         self._stash()
@@ -706,10 +711,15 @@ class SettingsDialog(QDialog):
             QMessageBox.warning(self, "Hotkey", "Use a format like Win+Shift+A or Ctrl+Alt+Q.")
             return
         self._stash()
+        failed = []
         for name, d in self._drafts.items():
             self.cfg.set_provider_field(name, "base_url", d["base_url"])
             self.cfg.set_provider_field(name, "model", d["model"])
-            Config.set_key(name, d["key"])
+            if d["key"] != Config.get_key(name) and not Config.set_key(name, d["key"]):
+                failed.append(name)
+        if failed:
+            QMessageBox.warning(self, "API key", "Couldn't save the key for " + ", ".join(failed) +
+                                " to Windows. It will work until you quit PrtSc AI.")
         self.cfg["provider"] = self._current
         self.cfg["bubble_enabled"] = self.bubble.isChecked()
         self.cfg["bubble_timeout"] = self.timeout.value()
