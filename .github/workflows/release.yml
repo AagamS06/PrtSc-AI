@@ -64,15 +64,3 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: dist/PrtSc-AI.exe
-          body: |
-            ## Download
-            **[PrtSc-AI.exe](https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/PrtSc-AI.exe)** — single file, no install needed.
-
-            1. Download `PrtSc-AI.exe` and double-click it.
-            2. Windows may show *"Windows protected your PC"* because the app isn't code-signed. Click **More info → Run anyway**.
-            3. Settings open on first run: pick a provider, paste an API key (Gemini has a free tier), pick a model, **Save**.
-            4. Snip with **Win+Shift+S** and click the **✦ AI** bubble, or press **Win+Shift+A**.
-
-            PrtSc AI lives in the system tray (bottom-right). Right-click it for Settings or Quit.
-
-            **Updating:** just download the new `PrtSc-AI.exe` and run it. Your settings and API keys are stored in Windows, not in the .exe, so they carry over automatically.
