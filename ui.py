@@ -25,6 +25,11 @@ if IS_MAC:
 else:
     import winsys as osys
 
+# macOS: leave the family unset so Qt uses the system font (San Francisco) instead of
+# searching for Segoe UI on every launch.
+FONT = "" if IS_MAC else "Segoe UI"
+FONT_CSS = "" if IS_MAC else "font-family: 'Segoe UI', sans-serif; "
+
 ACCENT = "#7C5CFF"
 ACCENT_2 = "#22D3EE"
 
@@ -36,7 +41,7 @@ def _pt(win: float) -> str:
 
 def build_style() -> str:
     return f"""
-QWidget {{ background: #15161B; color: #E8E8EE; font-family: 'Segoe UI', '.AppleSystemUIFont', 'Helvetica Neue', sans-serif; font-size: {_pt(10)}; }}
+QWidget {{ background: #15161B; color: #E8E8EE; {FONT_CSS}font-size: {_pt(10)}; }}
 QLineEdit, QPlainTextEdit, QComboBox, QSpinBox, QTextBrowser {{
     background: #1E2028; border: 1px solid #2E3140; border-radius: 8px; padding: 6px; }}
 QLineEdit:focus, QPlainTextEdit:focus, QComboBox:focus {{ border-color: {ACCENT}; }}
@@ -78,7 +83,7 @@ def draw_icon(size: int = 64) -> QPixmap:
     for x, y, dx, dy in ((12, 12, 1, 1), (52, 12, -1, 1), (12, 52, 1, -1), (52, 52, -1, -1)):
         p.drawLine(x, y, x + 9 * dx, y)
         p.drawLine(x, y, x, y + 9 * dy)
-    f = QFont("Segoe UI", 15)
+    f = QFont(FONT, 15)
     f.setBold(True)
     p.setFont(f)
     p.drawText(QRect(0, 0, 64, 64), Qt.AlignmentFlag.AlignCenter, "AI")
@@ -257,7 +262,7 @@ class _ScreenOverlay(QWidget):
             p.setPen(QPen(QColor(ACCENT), 2))
             p.drawRect(r.adjusted(0, 0, -1, -1))
             label = f"{r.width()} × {r.height()}"
-            p.setFont(QFont("Segoe UI", 12 if IS_MAC else 9))
+            p.setFont(QFont(FONT, 12 if IS_MAC else 9))
             tw = p.fontMetrics().horizontalAdvance(label) + 12
             ty = r.top() - 24 if r.top() > 30 else r.bottom() + 6
             p.fillRect(QRect(r.left(), ty, tw, 20), QColor(ACCENT))
@@ -265,7 +270,7 @@ class _ScreenOverlay(QWidget):
             p.drawText(QRect(r.left(), ty, tw, 20), Qt.AlignmentFlag.AlignCenter, label)
         else:
             p.setPen(QColor("white"))
-            p.setFont(QFont("Segoe UI", 16 if IS_MAC else 12))
+            p.setFont(QFont(FONT, 16 if IS_MAC else 12))
             p.drawText(self.rect().adjusted(0, 40, 0, 0),
                        Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop,
                        "Drag to select an area for AI  •  Esc to cancel")

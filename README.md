@@ -75,7 +75,7 @@ It starts with Windows by default (toggle in Settings).
 
 ### Mac
 
-Needs macOS 13 Ventura or later.
+Needs macOS Sonoma 14.4 or later.
 
 1. Download the `.dmg` for your Mac (table above) and open it.
 2. Drag **PrtSc AI** into **Applications**.
