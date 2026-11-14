@@ -1,4 +1,4 @@
-name: Build Windows release
+name: Build release
 
 on:
   push:
@@ -9,7 +9,7 @@ permissions:
   contents: write
 
 jobs:
-  build:
+  windows:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -26,7 +26,10 @@ jobs:
       - name: Import check (offscreen)
         env:
           QT_QPA_PLATFORM: offscreen
-        run: python -c "import providers, config, winsys, ui, main; print(winsys.parse_hotkey('Win+Shift+A'))"
+        run: python -c "import providers, config, winsys, macsys, ui, main; print(winsys.parse_hotkey('Win+Shift+A'), main.__version__)"
+
+      - name: Provider tests (mock server)
+        run: python tests/test_providers.py
 
       - name: Test key storage + migration from v1.0.0 (source)
         shell: pwsh
@@ -64,3 +67,124 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: dist/PrtSc-AI.exe
+
+  macos:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-latest      # Apple Silicon
+            arch: arm64
+          - runner: macos-15-intel    # Intel
+            arch: intel
+    runs-on: ${{ matrix.runner }}
+    env:
+      APP: dist/PrtSc AI.app
+      DMG: PrtSc-AI-mac-${{ matrix.arch }}.dmg
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt pyinstaller pillow
+          python -c "import platform, PyQt6.QtCore as q; print(platform.machine(), 'Qt', q.QT_VERSION_STR)"
+
+      - name: Import check (offscreen)
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: python -c "import providers, config, macsys, winsys, ui, main; print(macsys.parse_hotkey('Cmd+Shift+1'), macsys.hotkey_label('Cmd+Shift+1'), config.CONFIG_DIR, main.__version__)"
+
+      - name: Tests (providers, hotkeys, screenshot watcher, LaunchAgent)
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          python tests/test_providers.py
+          python tests/test_mac.py
+
+      - name: Keychain round-trip (source)
+        run: python -c "import config, sys; sys.exit(config.selftest())"
+
+      - name: Native checks (Carbon hotkey, window level, screen grab)
+        run: python tests/mac_native_check.py
+
+      - name: Build icon
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: python make_icon.py
+
+      - name: Build .app
+        run: |
+          pyinstaller --noconfirm --windowed --name "PrtSc AI" --icon assets/icon.icns \
+            --osx-bundle-identifier com.aagams06.prtscai \
+            --hidden-import keyring.backends.macOS --hidden-import keyring.backends.macOS.api main.py
+          VERSION=$(python main.py --version)
+          PL="$APP/Contents/Info.plist"
+          plutil -replace LSUIElement -bool true "$PL"
+          plutil -replace CFBundleShortVersionString -string "$VERSION" "$PL"
+          plutil -replace CFBundleVersion -string "$VERSION" "$PL"
+          plutil -replace CFBundleDisplayName -string "PrtSc AI" "$PL"
+          plutil -replace NSHighResolutionCapable -bool true "$PL"
+          plutil -replace NSScreenCaptureUsageDescription -string "PrtSc AI reads the part of the screen you snip so it can send it to the AI you choose." "$PL"
+          plutil -replace NSDesktopFolderUsageDescription -string "PrtSc AI watches your screenshot folder so it can offer the AI bubble after you take a screenshot." "$PL"
+          plutil -replace NSDocumentsFolderUsageDescription -string "PrtSc AI watches your screenshot folder so it can offer the AI bubble after you take a screenshot." "$PL"
+          plutil -replace NSDownloadsFolderUsageDescription -string "PrtSc AI watches your screenshot folder so it can offer the AI bubble after you take a screenshot." "$PL"
+          plutil -lint "$PL"
+          # Unsigned for Gatekeeper (no Apple Developer account); ad-hoc signature so it runs.
+          codesign --force --deep -s - "$APP"
+          codesign --verify --deep --verbose=2 "$APP"
+          lipo -archs "$APP/Contents/MacOS/PrtSc AI"
+          QTCORE=$(find "$APP" -name QtCore -type f | head -1)
+          otool -l "$QTCORE" | grep -A3 LC_BUILD_VERSION | grep minos || true
+          /usr/libexec/PlistBuddy -c Print "$PL"
+
+      - name: Self-test the built app (Keychain via the packaged binary)
+        run: |
+          "$APP/Contents/MacOS/PrtSc AI" --selftest
+          test "$("$APP/Contents/MacOS/PrtSc AI" --version)" = "$(python main.py --version)"
+          echo "app selftest passed"
+
+      - name: Smoke-run the built app (stays up as a menu-bar app)
+        run: |
+          "$APP/Contents/MacOS/PrtSc AI" > app.log 2>&1 &
+          PID=$!
+          sleep 10
+          if ! kill -0 $PID 2>/dev/null; then echo "app exited early"; cat app.log; exit 1; fi
+          kill $PID || true
+          cat app.log
+          ls -la ~/Library/LaunchAgents/ || true
+          cat ~/Library/LaunchAgents/com.aagams06.prtscai.plist || true
+          rm -f ~/Library/LaunchAgents/com.aagams06.prtscai.plist
+
+      - name: Build .dmg
+        run: |
+          rm -rf dmg && mkdir dmg
+          cp -R "$APP" dmg/
+          ln -s /Applications dmg/Applications
+          for i in 1 2 3 4 5; do
+            hdiutil create -volname "PrtSc AI" -srcfolder dmg -ov -format UDZO "$DMG" && break
+            echo "hdiutil busy, retrying ($i)"; sleep 5
+          done
+          test -f "$DMG"
+          MNT=$(hdiutil attach -nobrowse -readonly "$DMG" | tail -1 | cut -f3-)
+          ls -la "$MNT"
+          test -x "$MNT/PrtSc AI.app/Contents/MacOS/PrtSc AI"
+          test -L "$MNT/Applications"
+          hdiutil detach "$MNT" || hdiutil detach -force "$MNT"
+          ls -la "$DMG"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: PrtSc-AI-mac-${{ matrix.arch }}
+          path: ${{ env.DMG }}
+
+      - name: Publish release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ env.DMG }}

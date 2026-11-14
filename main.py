@@ -1,8 +1,14 @@
-"""PrtSc AI — Circle-to-Search for Windows.
+"""PrtSc AI — Circle-to-Search for Windows and macOS.
 
+Windows:
 * Win+Shift+S / PrtSc snip  -> "AI" bubble pops next to the cursor (timeout 1-10 s)
 * Win+Shift+A               -> straight to an AI snip, no bubble
 * Tray icon                 -> snip, settings, pause bubble, quit
+
+macOS:
+* Shift+Cmd+3/4/5 screenshot (saved file) or Ctrl+Shift+Cmd+4 (clipboard) -> same bubble
+* Shift+Cmd+1               -> straight to an AI snip
+* Menu-bar icon             -> same menu as the Windows tray
 """
 from __future__ import annotations
 
@@ -15,11 +21,16 @@ from PyQt6.QtGui import QAction, QGuiApplication, QImage
 from PyQt6.QtNetwork import QLocalServer, QLocalSocket
 from PyQt6.QtWidgets import QApplication, QMenu, QSystemTrayIcon
 
-import winsys
 from config import Config, set_start_with_windows
 from ui import Bubble, ChatWindow, SettingsDialog, SnipOverlay, app_icon
 
-__version__ = "1.0.2"
+IS_MAC = sys.platform == "darwin"
+if IS_MAC:
+    import macsys as osys
+else:
+    import winsys as osys
+
+__version__ = "1.1.0"
 SINGLETON = "PrtSc-AI-singleton"
 
 
@@ -31,6 +42,7 @@ class App:
         self.settings: SettingsDialog | None = None
         self._last_hash = b""
         self._last_time = 0.0
+        self._perm_dialog = None
 
         self.bubble = Bubble()
         self.bubble.ask.connect(self.open_chat)
@@ -42,8 +54,14 @@ class App:
         self._debounce.timeout.connect(self._check_clipboard)
         QGuiApplication.clipboard().dataChanged.connect(self._debounce.start)
 
+        # macOS screenshots are saved as files: watch the screenshot folder too
+        self.watcher = None
+        if IS_MAC:
+            self.watcher = osys.ScreenshotWatcher(only_screenshots=self.cfg["bubble_snips_only"])
+            self.watcher.captured.connect(lambda img, _path: self._offer(img))
+
         # global hotkey
-        self.hotkey = winsys.GlobalHotkey()
+        self.hotkey = osys.GlobalHotkey()
         self.hotkey.triggered.connect(self.start_snip)
         self.hotkey.failed.connect(lambda m: self.tray.showMessage("PrtSc AI", m))
 
@@ -56,6 +74,13 @@ class App:
         except Exception:
             pass
 
+        if IS_MAC and not osys.has_screen_recording():
+            # macOS shows its own prompt the first time; ours explains where the switch is
+            osys.request_screen_recording()
+            if not self.cfg["mac_permission_shown"]:
+                self.cfg["mac_permission_shown"] = True
+                QTimer.singleShot(800, self.show_permission_help)
+
         prev = self.cfg.data.get("last_version")
         has_key = bool(Config.get_key(self.cfg["provider"])) or not self._needs_key()
         if prev and prev != __version__:
@@ -63,9 +88,12 @@ class App:
                 f"PrtSc AI updated to v{__version__}",
                 "Your settings and API keys were carried over from your previous version.")
         elif self.cfg["first_run"] and not has_key:
-            self.tray.showMessage(
-                "PrtSc AI is running",
-                f"Snip with Win+Shift+S and click the AI bubble, or press {self.cfg['hotkey']}.")
+            if IS_MAC:
+                tip = (f"Take a screenshot (⇧⌘4) and click the AI bubble, "
+                       f"or press {self._hk_label()}.")
+            else:
+                tip = f"Snip with Win+Shift+S and click the AI bubble, or press {self.cfg['hotkey']}."
+            self.tray.showMessage("PrtSc AI is running", tip)
         if not has_key:
             QTimer.singleShot(400, self.show_settings)
         else:
@@ -75,6 +103,13 @@ class App:
             self.cfg.save()
         except Exception:
             pass
+
+    def _hk_label(self) -> str:
+        return osys.hotkey_label(self.cfg["hotkey"])
+
+    def _snip_text(self) -> str:
+        # macOS menus don't do tab-aligned shortcuts for plain text, so show it inline
+        return f"Snip with AI   {self._hk_label()}" if IS_MAC else f"Snip with AI\t{self.cfg['hotkey']}"
 
     def _needs_key(self) -> bool:
         import providers
@@ -86,7 +121,7 @@ class App:
         self.tray = QSystemTrayIcon(app_icon())
         self.tray.setToolTip("PrtSc AI")
         menu = QMenu()
-        self.act_snip = QAction(f"Snip with AI\t{self.cfg['hotkey']}")
+        self.act_snip = QAction(self._snip_text())
         self.act_snip.triggered.connect(self.start_snip)
         self.act_pause = QAction("Pause bubble", checkable=True)
         self.act_pause.toggled.connect(lambda on: self.bubble.hide() if on else None)
@@ -100,8 +135,9 @@ class App:
         menu.addAction(act_quit)
         self._menu, self._actions = menu, (act_settings, act_quit)
         self.tray.setContextMenu(menu)
-        self.tray.activated.connect(
-            lambda r: self.start_snip() if r == QSystemTrayIcon.ActivationReason.Trigger else None)
+        if not IS_MAC:  # on macOS a click on the menu-bar icon opens the menu instead
+            self.tray.activated.connect(
+                lambda r: self.start_snip() if r == QSystemTrayIcon.ActivationReason.Trigger else None)
         self.tray.show()
 
     # ---------------------------------------------------------------- flows
@@ -111,27 +147,58 @@ class App:
         md = QGuiApplication.clipboard().mimeData()
         if md is None or not md.hasImage():
             return
-        if self.cfg["bubble_snips_only"] and not winsys.looks_like_snip():
+        if self.cfg["bubble_snips_only"] and not osys.looks_like_snip():
             return
         img = QGuiApplication.clipboard().image()
         if img.isNull():
             return
-        h = hashlib.md5(img.scaled(32, 32).bits().asstring(32 * 32 * 4)).digest()
+        self._offer(img)
+
+    @staticmethod
+    def _fingerprint(img: QImage) -> bytes:
+        small = img.convertToFormat(QImage.Format.Format_RGB32).scaled(32, 32)
+        return hashlib.md5(small.bits().asstring(32 * 32 * 4)).digest()
+
+    def _offer(self, img: QImage) -> None:
+        """Pop the bubble once per screenshot, whichever way it arrived."""
+        if not self.cfg["bubble_enabled"] or self.act_pause.isChecked():
+            return
+        h = self._fingerprint(img)
         now = time.monotonic()
-        if h == self._last_hash and now - self._last_time < 3:
-            return  # same snip announced twice
+        if h == self._last_hash and now - self._last_time < 5:
+            return  # same image announced twice (snip tool rewrite, file + clipboard)
         self._last_hash, self._last_time = h, now
         self.bubble.popup(img, self.cfg["bubble_timeout"])
 
     def start_snip(self) -> None:
         self.bubble.hide()
+        if IS_MAC and not osys.has_screen_recording():
+            osys.request_screen_recording()
+            self.show_permission_help()
+            return
         QTimer.singleShot(120, self.overlay.start)  # let menus/bubble vanish first
+
+    def show_permission_help(self) -> None:
+        from ui import ScreenPermissionDialog
+        if self._perm_dialog and self._perm_dialog.isVisible():
+            self._perm_dialog.raise_()
+            return
+        self._perm_dialog = ScreenPermissionDialog()
+        if IS_MAC:
+            osys.activate_app()
+        self._perm_dialog.show()
+        self._perm_dialog.raise_()
+        self._perm_dialog.activateWindow()
 
     def open_chat(self, img: QImage) -> None:
         w = ChatWindow(img, self.cfg)
         w.open_settings.connect(self.show_settings)
         w.closed.connect(lambda win: self.chats.remove(win) if win in self.chats else None)
+        if self.watcher is not None:
+            w.image_saved.connect(self.watcher.ignore)
         self.chats.append(w)
+        if IS_MAC:
+            osys.activate_app()
         w.show()
         w.raise_()
         w.activateWindow()
@@ -143,13 +210,18 @@ class App:
             return
         self.settings = SettingsDialog(self.cfg)
         self.settings.saved.connect(self._on_saved)
+        if IS_MAC:
+            osys.activate_app()
         self.settings.show()
         self.settings.raise_()
         self.settings.activateWindow()
 
     def _on_saved(self) -> None:
         self.hotkey.start(self.cfg["hotkey"])
-        self.act_snip.setText(f"Snip with AI\t{self.cfg['hotkey']}")
+        self.act_snip.setText(self._snip_text())
+        if self.watcher is not None:
+            self.watcher.only_screenshots = self.cfg["bubble_snips_only"]
+            self.watcher.set_folder(osys.screenshot_folder())  # picks up a changed location
         for w in self.chats:
             w.refresh_model_label()
 
@@ -160,13 +232,20 @@ class App:
 
 
 def main() -> int:
-    if "--selftest" in sys.argv:  # used by CI against the built exe
+    if "--selftest" in sys.argv:  # used by CI against the built exe / .app
         from config import selftest
-        return selftest()
+        rc = selftest()
+        if rc == 0 and IS_MAC and osys.parse_hotkey(osys.DEFAULT_HOTKEY) != (0x300, 0x12):
+            rc = 2
+        if sys.stdout:  # a windowed .exe has no console
+            print("selftest", "passed" if rc == 0 else f"FAILED ({rc})")
+        return rc
     if "--version" in sys.argv:
         print(__version__)
         return 0
     qapp = QApplication(sys.argv)
+    if IS_MAC:
+        osys.set_accessory_app()  # menu bar only (the .app also sets LSUIElement)
     qapp.setApplicationName("PrtSc AI")
     qapp.setQuitOnLastWindowClosed(False)
     qapp.setWindowIcon(app_icon())

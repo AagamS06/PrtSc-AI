@@ -1,6 +1,7 @@
 """All windows: the AI bubble, the snip overlay, the chat window and settings."""
 from __future__ import annotations
 
+import sys
 import threading
 import webbrowser
 
@@ -18,11 +19,24 @@ from PyQt6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDialog,
 import providers
 from config import Config, set_start_with_windows
 
+IS_MAC = sys.platform == "darwin"
+if IS_MAC:
+    import macsys as osys
+else:
+    import winsys as osys
+
 ACCENT = "#7C5CFF"
 ACCENT_2 = "#22D3EE"
 
-STYLE = f"""
-QWidget {{ background: #15161B; color: #E8E8EE; font-family: 'Segoe UI', sans-serif; font-size: 10pt; }}
+
+def _pt(win: float) -> str:
+    """Point size that looks the same on both: macOS draws 1pt = 1px, Windows 1pt = 1.33px."""
+    return f"{round(win * 1.3) if IS_MAC else win}pt"
+
+
+def build_style() -> str:
+    return f"""
+QWidget {{ background: #15161B; color: #E8E8EE; font-family: 'Segoe UI', '.AppleSystemUIFont', 'Helvetica Neue', sans-serif; font-size: {_pt(10)}; }}
 QLineEdit, QPlainTextEdit, QComboBox, QSpinBox, QTextBrowser {{
     background: #1E2028; border: 1px solid #2E3140; border-radius: 8px; padding: 6px; }}
 QLineEdit:focus, QPlainTextEdit:focus, QComboBox:focus {{ border-color: {ACCENT}; }}
@@ -31,22 +45,28 @@ QPushButton:hover {{ background: #30344A; }}
 QPushButton:disabled {{ color: #6B6E80; }}
 QPushButton#primary {{ background: {ACCENT}; border: none; color: white; font-weight: 600; }}
 QPushButton#primary:hover {{ background: #8E72FF; }}
-QPushButton#chip {{ background: #1E2028; border-radius: 12px; padding: 3px 10px; font-size: 9pt; }}
+QPushButton#chip {{ background: #1E2028; border-radius: 12px; padding: 3px 10px; font-size: {_pt(9)}; }}
 QGroupBox {{ border: 1px solid #2E3140; border-radius: 10px; margin-top: 14px; padding: 10px; }}
 QGroupBox::title {{ subcontrol-origin: margin; left: 10px; padding: 0 4px; color: #A9ABBD; }}
-QLabel#muted {{ color: #8C8FA3; font-size: 9pt; }}
+QLabel#muted {{ color: #8C8FA3; font-size: {_pt(9)}; }}
 QLabel#error {{ color: #FF7A85; }}
 QCheckBox::indicator {{ width: 16px; height: 16px; }}
 """
 
 
+STYLE = build_style()
+
+
 # ------------------------------------------------------------------ helpers
 
-def app_icon() -> QIcon:
-    pm = QPixmap(64, 64)
+def draw_icon(size: int = 64) -> QPixmap:
+    """The app icon, drawn as vectors at any size (64 = tray, 1024 = .icns)."""
+    pm = QPixmap(size, size)
     pm.fill(Qt.GlobalColor.transparent)
     p = QPainter(pm)
     p.setRenderHint(QPainter.RenderHint.Antialiasing)
+    p.setRenderHint(QPainter.RenderHint.TextAntialiasing)
+    p.scale(size / 64, size / 64)
     g = QLinearGradient(0, 0, 64, 64)
     g.setColorAt(0, QColor(ACCENT))
     g.setColorAt(1, QColor(ACCENT_2))
@@ -63,7 +83,13 @@ def app_icon() -> QIcon:
     p.setFont(f)
     p.drawText(QRect(0, 0, 64, 64), Qt.AlignmentFlag.AlignCenter, "AI")
     p.end()
-    return QIcon(pm)
+    return pm
+
+
+def app_icon() -> QIcon:
+    icon = QIcon(draw_icon(64))
+    icon.addPixmap(draw_icon(128))  # sharp on Retina menu bars / HiDPI trays
+    return icon
 
 
 def image_to_png(img: QImage, max_side: int = 2000, max_bytes: int = 4_500_000) -> bytes:
@@ -106,7 +132,7 @@ def run_bg(fn, on_done, on_error):
 # ------------------------------------------------------------------ bubble
 
 class Bubble(QWidget):
-    """Small pill that appears next to the cursor after a Windows snip."""
+    """Small pill that appears next to the cursor after a Windows snip / macOS screenshot."""
     ask = pyqtSignal(QImage)
 
     def __init__(self) -> None:
@@ -126,9 +152,9 @@ class Bubble(QWidget):
             QLabel {{ background: transparent; }}
             QPushButton#ai {{ background: qlineargradient(x1:0,y1:0,x2:1,y2:1, stop:0 {ACCENT}, stop:1 {ACCENT_2});
                               color: white; border: none; border-radius: 10px; padding: 7px 16px;
-                              font-weight: 700; font-size: 11pt; }}
+                              font-weight: 700; font-size: {_pt(11)}; }}
             QPushButton#ai:hover {{ background: {ACCENT}; }}
-            QPushButton#x {{ background: transparent; border: none; color: #8C8FA3; font-size: 12pt; padding: 2px 6px; }}
+            QPushButton#x {{ background: transparent; border: none; color: #8C8FA3; font-size: {_pt(12)}; padding: 2px 6px; }}
             QPushButton#x:hover {{ color: white; }}
             QProgressBar {{ background: #262938; border: none; border-radius: 1px; max-height: 3px; }}
             QProgressBar::chunk {{ background: {ACCENT}; border-radius: 1px; }}
@@ -231,7 +257,7 @@ class _ScreenOverlay(QWidget):
             p.setPen(QPen(QColor(ACCENT), 2))
             p.drawRect(r.adjusted(0, 0, -1, -1))
             label = f"{r.width()} × {r.height()}"
-            p.setFont(QFont("Segoe UI", 9))
+            p.setFont(QFont("Segoe UI", 12 if IS_MAC else 9))
             tw = p.fontMetrics().horizontalAdvance(label) + 12
             ty = r.top() - 24 if r.top() > 30 else r.bottom() + 6
             p.fillRect(QRect(r.left(), ty, tw, 20), QColor(ACCENT))
@@ -239,14 +265,17 @@ class _ScreenOverlay(QWidget):
             p.drawText(QRect(r.left(), ty, tw, 20), Qt.AlignmentFlag.AlignCenter, label)
         else:
             p.setPen(QColor("white"))
-            p.setFont(QFont("Segoe UI", 12))
+            p.setFont(QFont("Segoe UI", 16 if IS_MAC else 12))
             p.drawText(self.rect().adjusted(0, 40, 0, 0),
                        Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop,
                        "Drag to select an area for AI  •  Esc to cancel")
 
     def _phys(self, r: QRect) -> QRect:
-        d = self.shot.devicePixelRatio()
-        return QRect(int(r.x() * d), int(r.y() * d), int(r.width() * d), int(r.height() * d))
+        # Pixels per logical point, measured rather than trusted: Retina (2x),
+        # mixed-DPI multi-monitor setups and Windows scaling all come out right.
+        w = max(1, self.width())
+        d = self.shot.width() / w if self.shot.width() else self.shot.devicePixelRatio()
+        return QRect(round(r.x() * d), round(r.y() * d), round(r.width() * d), round(r.height() * d))
 
     def mousePressEvent(self, e) -> None:
         if e.button() == Qt.MouseButton.RightButton:
@@ -294,7 +323,16 @@ class SnipOverlay(QObject):
             w.selected.connect(self._done)
             w.cancelled.connect(self._close)
             self.windows.append(w)
-            w.showFullScreen()
+            if IS_MAC:
+                # Full screen would slide into a new Space; cover the display instead,
+                # above the menu bar and the Dock.
+                w.setGeometry(screen.geometry())
+                w.show()
+                osys.float_above_everything(w)
+            else:
+                w.showFullScreen()
+        if IS_MAC:
+            osys.activate_app()
         under = QGuiApplication.screenAt(QCursor.pos())
         for w in self.windows:
             if w.screen() == under:
@@ -323,6 +361,7 @@ class ChatWindow(QWidget):
     open_settings = pyqtSignal()
     retrying = pyqtSignal(int, int, int)
     closed = pyqtSignal(object)
+    image_saved = pyqtSignal(str)
 
     def __init__(self, image: QImage, cfg: Config) -> None:
         super().__init__(None, Qt.WindowType.Window)
@@ -506,6 +545,7 @@ class ChatWindow(QWidget):
         from PyQt6.QtWidgets import QFileDialog
         path, _ = QFileDialog.getSaveFileName(self, "Save snip", "snip.png", "PNG (*.png)")
         if path:
+            self.image_saved.emit(path)  # so the screenshot-folder watcher ignores it
             self.image.save(path, "PNG")
 
     def closeEvent(self, e) -> None:
@@ -525,7 +565,7 @@ class SettingsDialog(QDialog):
         self.setWindowTitle("PrtSc AI — Settings")
         self.setWindowIcon(app_icon())
         self.setStyleSheet(STYLE)
-        self.setMinimumWidth(520)
+        self.setMinimumWidth(600 if IS_MAC else 520)
 
         root = QVBoxLayout(self)
 
@@ -579,18 +619,44 @@ class SettingsDialog(QDialog):
         # --- behaviour
         box2 = QGroupBox("Behaviour")
         f2 = QFormLayout(box2)
-        self.bubble = QCheckBox("Show the AI bubble after Win+Shift+S / PrtSc snips")
+        if IS_MAC:
+            self.bubble = QCheckBox("Show the AI bubble after ⇧⌘3 / ⇧⌘4 / ⇧⌘5 screenshots")
+            self.snips_only = QCheckBox("Only for screenshots")
+            # explicit line breaks: word-wrapped labels get clipped in form layouts
+            self.hotkey_hint = QLabel("Other images saved to the screenshot folder are ignored.\n"
+                                      "Copied images (⌃⇧⌘4) always show it: macOS doesn't\n"
+                                      "say which app copied them.")
+            self.hotkey_hint.setObjectName("muted")
+            self.autostart = QCheckBox("Open PrtSc AI at login")
+            hk_example = "e.g. Cmd+Shift+1"
+        else:
+            self.bubble = QCheckBox("Show the AI bubble after Win+Shift+S / PrtSc snips")
+            self.snips_only = QCheckBox("Only for Windows snips (ignore images copied from other apps)")
+            self.hotkey_hint = None
+            self.autostart = QCheckBox("Start PrtSc AI when Windows starts")
+            hk_example = "e.g. Win+Shift+A"
         self.timeout = QSpinBox()
         self.timeout.setRange(1, 10)
         self.timeout.setSuffix(" s")
-        self.snips_only = QCheckBox("Only for Windows snips (ignore images copied from other apps)")
         self.hotkey = QLineEdit()
-        self.hotkey.setPlaceholderText("e.g. Win+Shift+A")
-        self.autostart = QCheckBox("Start PrtSc AI when Windows starts")
+        self.hotkey.setPlaceholderText(hk_example)
+        hk_row = QHBoxLayout()
+        hk_row.addWidget(self.hotkey, 1)
+        self.hotkey_preview = QLabel()
+        self.hotkey_preview.setObjectName("hkcap")
+        self.hotkey_preview.setStyleSheet(
+            "QLabel#hkcap { background: #262938; border: 1px solid #343850; border-radius: 6px;"
+            f" padding: 3px 8px; font-weight: 600; font-size: {_pt(10)}; }}")
+        self.hotkey_preview.setVisible(IS_MAC)
+        hk_row.addWidget(self.hotkey_preview)
+        self.hotkey.textChanged.connect(self._update_hotkey_preview)
         f2.addRow(self.bubble)
         f2.addRow("Bubble disappears after", self.timeout)
         f2.addRow(self.snips_only)
-        f2.addRow("Direct AI snip hotkey", self.hotkey)
+        if self.hotkey_hint is not None:
+            self.hotkey_hint.setContentsMargins(26, 0, 0, 4)
+            f2.addRow(self.hotkey_hint)
+        f2.addRow("Direct AI snip hotkey", hk_row)
         f2.addRow(self.autostart)
         root.addWidget(box2)
 
@@ -619,6 +685,10 @@ class SettingsDialog(QDialog):
         self.bubble.toggled.connect(self.timeout.setEnabled)
         self.timeout.setEnabled(self.bubble.isChecked())
 
+    def _update_hotkey_preview(self, text: str) -> None:
+        ok = osys.parse_hotkey(text.strip()) is not None
+        self.hotkey_preview.setText(osys.hotkey_label(text.strip()) if ok else "?")
+
     # --- provider switching keeps unsaved edits per provider
     def _preset(self) -> providers.Preset:
         return providers.PRESETS_BY_NAME[self.provider.currentText()]
@@ -642,7 +712,9 @@ class SettingsDialog(QDialog):
         self.model.setEditText(d["model"] if d else self.cfg.provider_field(name, "model"))
         self.get_key.setVisible(bool(p.key_url))
         self.hint.setText(p.hint or "Pick a model that accepts images (vision).")
-        self.test_result.setText("✓ Saved key loaded from Windows. No need to paste it again." if saved and not d else "")
+        store = "your Keychain" if IS_MAC else "Windows"
+        self.test_result.setText(f"✓ Saved key loaded from {store}. No need to paste it again."
+                                 if saved and not d else "")
         if not (saved and not d):
             self.test_result.setStyleSheet("")
 
@@ -705,10 +777,10 @@ class SettingsDialog(QDialog):
 
     # --- save
     def _save(self) -> None:
-        from winsys import parse_hotkey
         hk = self.hotkey.text().strip()
-        if hk and parse_hotkey(hk) is None:
-            QMessageBox.warning(self, "Hotkey", "Use a format like Win+Shift+A or Ctrl+Alt+Q.")
+        if hk and osys.parse_hotkey(hk) is None:
+            QMessageBox.warning(self, "Hotkey", "Use a format like Cmd+Shift+1 or Ctrl+Option+Q."
+                                if IS_MAC else "Use a format like Win+Shift+A or Ctrl+Alt+Q.")
             return
         self._stash()
         failed = []
@@ -719,12 +791,13 @@ class SettingsDialog(QDialog):
                 failed.append(name)
         if failed:
             QMessageBox.warning(self, "API key", "Couldn't save the key for " + ", ".join(failed) +
-                                " to Windows. It will work until you quit PrtSc AI.")
+                                (" to your Keychain." if IS_MAC else " to Windows.") +
+                                " It will work until you quit PrtSc AI.")
         self.cfg["provider"] = self._current
         self.cfg["bubble_enabled"] = self.bubble.isChecked()
         self.cfg["bubble_timeout"] = self.timeout.value()
         self.cfg["bubble_snips_only"] = self.snips_only.isChecked()
-        self.cfg["hotkey"] = hk or "Win+Shift+A"
+        self.cfg["hotkey"] = hk or osys.DEFAULT_HOTKEY
         self.cfg["start_with_windows"] = self.autostart.isChecked()
         self.cfg["first_run"] = False
         self.cfg.save()
@@ -733,4 +806,71 @@ class SettingsDialog(QDialog):
         except Exception:
             pass
         self.saved.emit()
+        self.accept()
+
+
+# ------------------------------------------------------------------ macOS permission
+
+class ScreenPermissionDialog(QDialog):
+    """Explains macOS's Screen Recording permission, with a button to the right pane."""
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("PrtSc AI — Screen Recording")
+        self.setWindowIcon(app_icon())
+        self.setStyleSheet(STYLE)
+        root = QVBoxLayout(self)
+        root.setSizeConstraint(QVBoxLayout.SizeConstraint.SetFixedSize)
+        root.setContentsMargins(22, 20, 22, 18)
+        root.setSpacing(12)
+
+        head = QHBoxLayout()
+        head.setSpacing(14)
+        icon = QLabel()
+        icon.setPixmap(draw_icon(112).scaled(56, 56, Qt.AspectRatioMode.KeepAspectRatio,
+                                             Qt.TransformationMode.SmoothTransformation))
+        icon.setFixedSize(56, 56)
+        title = QLabel("Allow Screen Recording")
+        title.setStyleSheet(f"font-size: {_pt(14)}; font-weight: 700;")
+        sub = QLabel("PrtSc AI needs it to see the part\nof the screen you snip.")
+        sub.setObjectName("muted")
+        tcol = QVBoxLayout()
+        tcol.setSpacing(2)
+        tcol.addWidget(title)
+        tcol.addWidget(sub)
+        head.addWidget(icon)
+        head.addLayout(tcol, 1)
+        root.addLayout(head)
+
+        steps = QLabel(
+            "1.&nbsp; Click <b>Open System Settings</b>.<br>"
+            "2.&nbsp; Go to <b>Privacy &amp; Security → Screen Recording</b><br>"
+            "&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;and turn on <b>PrtSc AI</b>.<br>"
+            "3.&nbsp; If macOS asks, choose <b>Quit &amp; Reopen</b>.")
+        steps.setTextFormat(Qt.TextFormat.RichText)
+        steps.setStyleSheet("background: #1E2028; border: 1px solid #2E3140; border-radius: 10px;"
+                            " padding: 10px 12px;")
+        root.addWidget(steps)
+        note = QLabel("Your screen is only read when you snip. Images go only to the\n"
+                      "AI provider you picked, and only when you press Send.")
+        note.setObjectName("muted")
+        root.addWidget(note)
+
+        btns = QHBoxLayout()
+        btns.addStretch()
+        later = QPushButton("Later")
+        later.clicked.connect(self.reject)
+        go = QPushButton("Open System Settings")
+        go.setObjectName("primary")
+        go.setDefault(True)
+        go.clicked.connect(self._open)
+        btns.addWidget(later)
+        btns.addWidget(go)
+        root.addLayout(btns)
+
+    def _open(self) -> None:
+        try:
+            osys.open_privacy_pane()
+        except Exception:
+            pass
         self.accept()

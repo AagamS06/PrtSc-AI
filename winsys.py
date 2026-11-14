@@ -36,6 +36,7 @@ WM_HOTKEY = 0x0312
 WM_QUIT = 0x0012
 MOD_ALT, MOD_CONTROL, MOD_SHIFT, MOD_WIN, MOD_NOREPEAT = 0x1, 0x2, 0x4, 0x8, 0x4000
 PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+DEFAULT_HOTKEY = "Win+Shift+A"
 
 # Processes that own the clipboard after a Win+Shift+S / PrtSc snip.
 SNIP_PROCESSES = {"screenclippinghost.exe", "snippingtool.exe", "screensketch.exe"}
@@ -93,6 +94,11 @@ def parse_hotkey(text: str) -> tuple[int, int] | None:
     if vk is None or mods == 0:
         return None
     return mods, vk
+
+
+def hotkey_label(text: str) -> str:
+    """How a hotkey is shown in menus (Windows: as typed)."""
+    return text
 
 
 class GlobalHotkey(QObject):

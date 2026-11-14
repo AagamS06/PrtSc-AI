@@ -63,7 +63,7 @@ PRESETS: list[Preset] = [
 PRESETS_BY_NAME = {p.name: p for p in PRESETS}
 
 SYSTEM_PROMPT = (
-    "You are a helpful assistant built into a Windows screenshot tool. "
+    "You are a helpful assistant built into a screenshot tool. "
     "The user captured part of their screen and is asking about it. "
     "Answer directly and concisely. Use markdown when it helps."
 )

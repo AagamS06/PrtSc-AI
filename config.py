@@ -1,7 +1,9 @@
 """Settings storage that survives updates.
 
-Everything lives in Windows, never inside the .exe, so any newer PrtSc-AI.exe
-(wherever it's downloaded to) picks up the previous version's setup:
+Everything lives in the OS, never inside the .exe/.app, so any newer download
+(wherever it's saved) picks up the previous version's setup.
+
+Windows:
 
   * Settings (provider, model, hotkey, bubble...) -> %APPDATA%\\PrtSc AI\\settings.json
   * API keys -> Windows Credential Manager ("PrtSc AI:<provider>"), written with
@@ -10,6 +12,13 @@ Everything lives in Windows, never inside the .exe, so any newer PrtSc-AI.exe
     (only your Windows account can decrypt it) and kept in settings.json.
   * Keys saved by v1.0.0 (via the keyring library) are found and migrated
     automatically the first time they're needed.
+
+macOS:
+  * Settings -> ~/Library/Application Support/PrtSc AI/settings.json
+  * API keys -> the login Keychain (service "PrtSc AI", account = provider), via
+    keyring's macOS backend imported directly (no entry-point discovery).
+  * Open at login -> a LaunchAgent in ~/Library/LaunchAgents, re-pointed at the
+    running .app on every launch.
 """
 from __future__ import annotations
 
@@ -22,9 +31,12 @@ from pathlib import Path
 APP_NAME = "PrtSc AI"
 SERVICE = "PrtSc AI"
 IS_WIN = sys.platform == "win32"
+IS_MAC = sys.platform == "darwin"
 
 if IS_WIN:
     CONFIG_DIR = Path(os.environ.get("APPDATA", Path.home())) / APP_NAME
+elif IS_MAC:
+    CONFIG_DIR = Path.home() / "Library" / "Application Support" / APP_NAME
 else:
     CONFIG_DIR = Path.home() / ".config" / "prtsc-ai"
 CONFIG_FILE = CONFIG_DIR / "settings.json"
@@ -35,9 +47,10 @@ DEFAULTS = {
     "providers": {},
     "bubble_enabled": True,
     "bubble_timeout": 3,         # seconds, 1-10
-    "bubble_snips_only": True,   # only pop for Windows snip tool copies
-    "hotkey": "Win+Shift+A",
-    "start_with_windows": True,
+    "bubble_snips_only": True,   # only pop for Windows snips / macOS screenshots
+    "hotkey": "Cmd+Shift+1" if IS_MAC else "Win+Shift+A",
+    "start_with_windows": True,  # "Open at login" on macOS
+    "mac_permission_shown": False,
     "first_run": True,
     "enc_keys": {},              # DPAPI fallback only
 }
@@ -151,6 +164,42 @@ def _dpapi(data: bytes, protect: bool) -> bytes | None:
         _kernel.LocalFree(out.pbData)
 
 
+# =============================================================== macOS Keychain
+_kc = [None]
+
+
+def _keychain():
+    """keyring's macOS backend, imported directly (no plugin discovery)."""
+    if not IS_MAC:
+        return None
+    if _kc[0] is None:
+        from keyring.backends.macOS import Keyring
+        _kc[0] = Keyring()
+    return _kc[0]
+
+
+def _kc_get(provider: str) -> str:
+    try:
+        return _keychain().get_password(SERVICE, provider) or ""
+    except Exception:
+        return ""
+
+
+def _kc_set(provider: str, key: str) -> bool:
+    try:
+        _keychain().set_password(SERVICE, provider, key)
+        return _kc_get(provider) == key
+    except Exception:
+        return False
+
+
+def _kc_delete(provider: str) -> None:
+    try:
+        _keychain().delete_password(SERVICE, provider)
+    except Exception:
+        pass
+
+
 def _target(provider: str) -> str:
     return f"{SERVICE}:{provider}"
 
@@ -163,6 +212,8 @@ def _legacy_key(provider: str) -> str:
         hit = _cred_read(target)
         if hit and hit[0] == provider and hit[1]:
             return hit[1]
+    if IS_MAC:
+        return ""  # the Keychain IS the store on macOS; nothing to migrate
     try:  # last resort: ask keyring itself (non-Windows dev runs, odd backends)
         import keyring
         return keyring.get_password(SERVICE, provider) or ""
@@ -214,6 +265,8 @@ class Config:
     # --- secrets
     @staticmethod
     def get_key(provider: str) -> str:
+        if IS_MAC:
+            return _kc_get(provider)
         hit = _cred_read(_target(provider))
         if hit and hit[1]:
             return hit[1]
@@ -233,6 +286,11 @@ class Config:
     def set_key(provider: str, key: str) -> bool:
         """Store (or clear) a key. Returns True if it is persisted."""
         cfg = _active[0]
+        if IS_MAC:
+            if not key:
+                _kc_delete(provider)
+                return True
+            return _kc_set(provider, key)
         if not key:
             _cred_delete(_target(provider))
             if cfg is not None and cfg.data.get("enc_keys", {}).pop(provider, None) is not None:
@@ -262,7 +320,12 @@ _active: list[Config | None] = [None]
 
 
 def set_start_with_windows(enabled: bool) -> None:
-    """(Re)point the login entry at THIS exe, so a newer download replaces the old one."""
+    """(Re)point the login entry at THIS exe/.app, so a newer download replaces the old one.
+    On macOS this is a LaunchAgent ("Open at login")."""
+    if IS_MAC:
+        from macsys import set_open_at_login
+        set_open_at_login(enabled)
+        return
     if not IS_WIN:
         return
     import winreg
@@ -289,6 +352,9 @@ def selftest() -> int:
     cfg = Config()
     try:
         ok = Config.set_key(name, "sk-test-123") and Config.get_key(name) == "sk-test-123"
+        if IS_MAC:  # must really be in the Keychain, and clearing must work
+            ok = ok and _kc_get(name) == "sk-test-123"
+            ok = ok and Config.set_key(name, "") and Config.get_key(name) == ""
         # simulate a v1.0.0 keyring entry and make sure it migrates
         if IS_WIN:
             _cred_write(f"{name}2@{SERVICE}", f"{name}2", "legacy-456")
